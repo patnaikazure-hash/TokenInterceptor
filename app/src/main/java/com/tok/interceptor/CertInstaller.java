@@ -5,6 +5,7 @@ import android.util.Log;
 
 import java.io.*;
 import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.security.cert.X509Certificate;
 import java.util.Date;
@@ -311,11 +312,4 @@ public class CertInstaller {
         return "-----BEGIN CERTIFICATE-----\n" + b64 + "-----END CERTIFICATE-----\n";
     }
 
-    private static final java.nio.charset.Charset StandardCharsets_UTF_8 =
-        java.nio.charset.Charset.forName("UTF-8");
-
-    // Inner class to avoid import conflict
-    private static class StandardCharsets {
-        static final java.nio.charset.Charset UTF_8 = java.nio.charset.Charset.forName("UTF-8");
-    }
 }
