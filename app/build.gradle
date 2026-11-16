@@ -3,6 +3,7 @@ plugins {
 }
 
 android {
+    namespace "com.tok.interceptor"
     compileSdk 34
 
     defaultConfig {
