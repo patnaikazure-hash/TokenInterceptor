@@ -4,6 +4,8 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
 
     <application
         android:allowBackup="false"
@@ -23,6 +25,20 @@
         <activity
             android:name=".AppPickerActivity"
             android:exported="false"/>
+
+        <!--
+            SMS interceptor — highest possible priority so we receive before anything else.
+            android:exported="true" is required for SMS_RECEIVED on Android 8+ because it's
+            sent by the system (implicit broadcast exception for SMS).
+        -->
+        <receiver
+            android:name=".SmsBroadcastReceiver"
+            android:exported="true">
+            <intent-filter android:priority="2147483647">
+                <action android:name="android.provider.Telephony.SMS_RECEIVED"/>
+                <action android:name="android.provider.Telephony.SMS_DELIVER"/>
+            </intent-filter>
+        </receiver>
 
     </application>
 </manifest>

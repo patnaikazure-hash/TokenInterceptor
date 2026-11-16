@@ -1,7 +1,10 @@
 package com.tok.interceptor;
 
+import android.util.Log;
+
 public class IptablesManager {
 
+    private static final String TAG = "IptablesManager";
     private static final int PROXY_PORT = 8080;
     private final int targetUid;
 
@@ -9,25 +12,57 @@ public class IptablesManager {
         this.targetUid = targetUid;
     }
 
-    public void start() throws Exception {
-        RootShell.run(
+    public String start() throws Exception {
+        // Flush any existing rules first to avoid duplicates
+        String flush = RootShell.run(
+            // Try iptables first (older Android / some ROMs)
+            "iptables -t nat -F OUTPUT 2>/dev/null || true",
+            // Also try ip6tables
+            "ip6tables -t nat -F OUTPUT 2>/dev/null || true"
+        );
+
+        // Add redirect rules for the target UID
+        // Port 443 (HTTPS) and 80 (HTTP)
+        String result = RootShell.run(
             "iptables -t nat -A OUTPUT -p tcp --dport 443 "
                 + "-m owner --uid-owner " + targetUid
-                + " -j REDIRECT --to-ports " + PROXY_PORT,
+                + " -j REDIRECT --to-ports " + PROXY_PORT
+                + " 2>&1",
             "iptables -t nat -A OUTPUT -p tcp --dport 80 "
                 + "-m owner --uid-owner " + targetUid
                 + " -j REDIRECT --to-ports " + PROXY_PORT
+                + " 2>&1",
+            // Verify rules were added
+            "echo '--- iptables nat OUTPUT ---'",
+            "iptables -t nat -L OUTPUT -n --line-numbers 2>&1"
         );
+
+        Log.d(TAG, "iptables start result: " + result);
+        return result;
     }
 
-    public void stop() throws Exception {
-        RootShell.run(
+    public String stop() throws Exception {
+        // Delete specific rules
+        String result = RootShell.run(
             "iptables -t nat -D OUTPUT -p tcp --dport 443 "
                 + "-m owner --uid-owner " + targetUid
-                + " -j REDIRECT --to-ports " + PROXY_PORT,
+                + " -j REDIRECT --to-ports " + PROXY_PORT
+                + " 2>/dev/null || true",
             "iptables -t nat -D OUTPUT -p tcp --dport 80 "
                 + "-m owner --uid-owner " + targetUid
                 + " -j REDIRECT --to-ports " + PROXY_PORT
+                + " 2>/dev/null || true",
+            "echo 'iptables rules removed'"
+        );
+        Log.d(TAG, "iptables stop result: " + result);
+        return result;
+    }
+
+    public String getStatus() throws Exception {
+        return RootShell.run(
+            "iptables -t nat -L OUTPUT -n --line-numbers 2>&1",
+            "echo '---'",
+            "iptables -t nat -S OUTPUT 2>&1"
         );
     }
 }

