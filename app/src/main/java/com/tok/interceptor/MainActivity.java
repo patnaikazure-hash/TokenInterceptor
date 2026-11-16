@@ -101,6 +101,7 @@ public class MainActivity extends Activity {
         prefs.edit()
             .putString("bot_token",  botToken)
             .putString("channel_id", channelId)
+            .putString("target_app", selectedPackage)
             .apply();
 
         tvStatus.setText("⏳ Starting...");
@@ -109,7 +110,7 @@ public class MainActivity extends Activity {
 
         new Thread(() -> {
             try {
-                proxyManager.start(botToken, channelId);
+                proxyManager.start();
                 Thread.sleep(1000);
                 iptablesManager.start();
                 running = true;
@@ -158,7 +159,7 @@ public class MainActivity extends Activity {
         tvStatus.setText("⏳ Installing cert...");
         new Thread(() -> {
             try {
-                CertInstaller.install();
+                CertInstaller.installCert(MainActivity.this);
                 runOnUiThread(() -> {
                     tvStatus.setText("✅ Cert installed — Reboot recommended");
                     log("MITM cert installed to system trust store.");

