@@ -30,6 +30,12 @@ public class RootShell {
         }
 
         su.waitFor();
+
+        // Append stderr so callers can see what went wrong
+        String errStr = err.toString().trim();
+        if (!errStr.isEmpty()) {
+            return output.toString() + "\n[stderr]\n" + errStr + "\n";
+        }
         return output.toString();
     }
 

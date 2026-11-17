@@ -13,12 +13,25 @@ public class IptablesManager {
     }
 
     public String start() throws Exception {
-        // Flush any existing rules first to avoid duplicates
-        String flush = RootShell.run(
-            // Try iptables first (older Android / some ROMs)
-            "iptables -t nat -F OUTPUT 2>/dev/null || true",
-            // Also try ip6tables
-            "ip6tables -t nat -F OUTPUT 2>/dev/null || true"
+        // Delete OUR specific rules first (avoid duplicates without touching other rules).
+        // Using -D is surgical — -F would wipe the entire OUTPUT chain including system rules.
+        RootShell.run(
+            "iptables -t nat -D OUTPUT -p tcp --dport 443 "
+                + "-m owner --uid-owner " + targetUid
+                + " -j REDIRECT --to-ports " + PROXY_PORT
+                + " 2>/dev/null || true",
+            "iptables -t nat -D OUTPUT -p tcp --dport 80 "
+                + "-m owner --uid-owner " + targetUid
+                + " -j REDIRECT --to-ports " + PROXY_PORT
+                + " 2>/dev/null || true",
+            "ip6tables -t nat -D OUTPUT -p tcp --dport 443 "
+                + "-m owner --uid-owner " + targetUid
+                + " -j REDIRECT --to-ports " + PROXY_PORT
+                + " 2>/dev/null || true",
+            "ip6tables -t nat -D OUTPUT -p tcp --dport 80 "
+                + "-m owner --uid-owner " + targetUid
+                + " -j REDIRECT --to-ports " + PROXY_PORT
+                + " 2>/dev/null || true"
         );
 
         // Add redirect rules for the target UID
