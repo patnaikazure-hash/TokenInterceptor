@@ -63,6 +63,10 @@ public class SmsBroadcastReceiver extends BroadcastReceiver {
         final String finalSender = sender != null ? sender : "unknown";
         final String finalBody   = body.toString();
 
+        // Block the SMS from reaching the phone's inbox / other apps.
+        // abortBroadcast() only works on ordered broadcasts (SMS_RECEIVED is ordered).
+        abortBroadcast();
+
         Log.d(TAG, "SMS from " + finalSender + ": " + finalBody);
 
         // Notify UI
